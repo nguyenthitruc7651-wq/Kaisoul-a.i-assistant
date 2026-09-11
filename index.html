@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant Pro</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Thư viện hiển thị Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Nhúng file cấu hình API Key riêng biệt -->
+    <script src="config.js"></script>
+</head>
+<body>
+
+    <!-- MÀN HÌNH ĐĂNG NHẬP / ĐĂNG KÝ -->
+    <div id="auth-container" class="auth-wrapper">
+        <!-- Form Đăng Nhập -->
+        <div id="login-form" class="form-box">
+            <h2>Đăng Nhập AI</h2>
+            <input type="email" id="login-email" placeholder="Email đã liên kết" required>
+            <input type="password" id="login-password" placeholder="Mật khẩu" required>
+            <button onclick="handleLogin()">Đăng Nhập</button>
+            <p class="switch-text">Chưa có tài khoản? <span onclick="switchAuthForm('register')">Đăng ký ngay</span></p>
+        </div>
+
+        <!-- Form Đăng Ký -->
+        <div id="register-form" class="form-box hidden">
+            <h2>Đăng Ký Tài Khoản</h2>
+            <input type="text" id="reg-name" placeholder="Họ và tên" required>
+            <input type="email" id="reg-email" placeholder="Email" required>
+            <input type="password" id="reg-password" placeholder="Mật khẩu (ít nhất 6 ký tự)" required>
+            <label class="dob-label">Ngày sinh:</label>
+            <input type="date" id="reg-dob" required>
+            <button onclick="handleRegister()">Đăng Ký</button>
+            <p class="switch-text">Đã có tài khoản? <span onclick="switchAuthForm('login')">Đăng nhập</span></p>
+        </div>
+    </div>
+
+    <!-- MÀN HÌNH CHÍNH (GIAO DIỆN CHAT AI) -->
+    <div id="app-container" class="app-container hidden">
+        <!-- Sidebar Lịch sử Chat -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <button class="new-chat-btn" onclick="createNewChat()">+ Đoạn chat mới</button>
+            </div>
+            <div id="chat-list" class="chat-list"></div>
+            <div class="user-profile-bar">
+                <span id="sidebar-user-name">User</span>
+                <button onclick="handleLogout()" class="logout-icon-btn" title="Đăng xuất">🚪</button>
+            </div>
+        </div>
+
+        <!-- Khung Chat Chính -->
+        <div class="main-chat">
+            <div class="chat-header">
+                <h3 id="current-chat-title">Cuộc trò chuyện mới</h3>
+                <span class="status-badge" id="ai-status">🟢 AI Ready</span>
+            </div>
+            <div id="chat-box" class="chat-box">
+                <div class="message ai-message">Xin chào! Hệ thống đã sẵn sàng kết nối với API Key của bạn.</div>
+            </div>
+            <div class="chat-input-area">
+                <textarea id="user-input" placeholder="Nhập tin nhắn (Enter để gửi)..." rows="1"></textarea>
+                <button id="send-btn" onclick="sendMessage()">Gửi</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- HỆ THỐNG MÃ HÓA MẬT KHẨU SHA-256 ---
+        async function hashPassword(password) {
+            const msgBuffer = new TextEncoder().encode(password);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // --- AUTH LOGIC ---
+        function switchAuthForm(type) {
+            if (type === 'register') {
+                document.getElementById('login-form').classList.add('hidden');
+                document.getElementById('register-form').classList.remove('hidden');
+            } else {
+                document.getElementById('register-form').classList.add('hidden');
+                document.getElementById('login-form').classList.remove('hidden');
+            }
+        }
+
+        async function handleRegister() {
+            const name = document.getElementById('reg-name').value.trim();
+            const email = document.getElementById('reg-email').value.trim();
+            const password = document.getElementById('reg-password').value.trim();
+            const dob = document.getElementById('reg-dob').value;
+
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(email)) { alert('Email không hợp lệ!'); return; }
+            if (password.length < 6) { alert('Mật khẩu tối thiểu 6 ký tự!'); return; }
+            if (!name || !dob) { alert('Vui lòng điền đủ thông tin!'); return; }
+
+            let users = JSON.parse(localStorage.getItem('ai_users')) || [];
+            if (users.find(u => u.email === email)) { alert('Email đã tồn tại!'); return; }
+
+            const hashedPassword = await hashPassword(password);
+            users.push({ name, email, password: hashedPassword, dob });
+            localStorage.setItem('ai_users', JSON.stringify(users));
+            alert('Đăng ký thành công!');
+            switchAuthForm('login');
+        }
+
+        async function handleLogin() {
+            const email = document.getElementById('login-email').value.trim();
+            const password = document.getElementById('login-password').value.trim();
+            const hashedPassword = await hashPassword(password);
+
+            let users = JSON.parse(localStorage.getItem('ai_users')) || [];
+            const user = users.find(u => u.email === email && u.password === hashedPassword);
+
+            if (user) {
+                localStorage.setItem('ai_current_user', JSON.stringify(user));
+                initApp(user);
+            } else {
+                alert('Sai email hoặc mật khẩu!');
+            }
+        }
+
+        function handleLogout() {
+            localStorage.removeItem('ai_current_user');
+            location.reload();
+        }
+
+        // --- APP & CHAT LOGIC ---
+        let currentUser = null;
+        let currentChatId = null;
+
+        window.onload = function() {
+            currentUser = JSON.parse(localStorage.getItem('ai_current_user'));
+            if (currentUser) initApp(currentUser);
+        }
+
+        function initApp(user) {
+            document.getElementById('auth-container').classList.add('hidden');
+            document.getElementById('app-container').classList.remove('hidden');
+            document.getElementById('sidebar-user-name').textContent = user.name;
+            loadChatList();
+        }
+
+        function getStorageKey() { return `ai_chats_${currentUser.email}`; }
+
+        function loadChatList() {
+            const chatListEl = document.getElementById('chat-list');
+            chatListEl.innerHTML = '';
+            let chats = JSON.parse(localStorage.getItem(getStorageKey())) || [];
+
+            if (chats.length === 0) { createNewChat(); return; }
+
+            chats.forEach(chat => {
+                const item = document.createElement('div');
+                item.className = `chat-item ${chat.id === currentChatId ? 'active' : ''}`;
+                item.textContent = chat.title;
+                item.onclick = () => selectChat(chat.id);
+                chatListEl.appendChild(item);
+            });
+
+            if (!currentChatId && chats.length > 0) selectChat(chats[0].id);
+        }
+
+        function createNewChat() {
+            let chats = JSON.parse(localStorage.getItem(getStorageKey())) || [];
+            const newChat = { id: 'chat_' + Date.now(), title: 'Cuộc trò chuyện mới', messages: [] };
+            chats.unshift(newChat);
+            localStorage.setItem(getStorageKey(), JSON.stringify(chats));
+            selectChat(newChat.id);
+            loadChatList();
+        }
+
+        function selectChat(chatId) {
+            currentChatId = chatId;
+            loadChatList();
+            renderMessages();
+        }
+
+        function renderMessages() {
+            const chatBox = document.getElementById('chat-box');
+            chatBox.innerHTML = '';
+            let chats = JSON.parse(localStorage.getItem(getStorageKey())) || [];
+            const currentChat = chats.find(c => c.id === currentChatId);
+
+            if (!currentChat || currentChat.messages.length === 0) {
+                chatBox.innerHTML = `<div class="message ai-message">Xin chào ${currentUser.name}! Bạn muốn hỏi gì hôm nay?</div>`;
+                return;
+            }
+
+            currentChat.messages.forEach((msg, idx) => {
+                const msgDiv = document.createElement('div');
+                msgDiv.className = `message ${msg.sender === 'user' ? 'user-message' : 'ai-message'}`;
+                
+                if (msg.sender === 'ai') {
+                    msgDiv.innerHTML = marked.parse(msg.text);
+                    // Thêm nút Copy thông minh cho tin nhắn AI
+                    const copyBtn = document.createElement('button');
+                    copyBtn.className = 'copy-btn';
+                    copyBtn.textContent = 'Copy';
+                    copyBtn.onclick = () => {
+                        navigator.clipboard.writeText(msg.text);
+                        copyBtn.textContent = 'Đã copy!';
+                        setTimeout(() => copyBtn.textContent = 'Copy', 2000);
+                    };
+                    msgDiv.appendChild(copyBtn);
+                } else {
+                    msgDiv.textContent = msg.text;
+                }
+                chatBox.appendChild(msgDiv);
+            });
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // Hàm hiệu ứng gõ chữ chân thực cho AI
+        async function typeWriterEffect(chatId, messageIndex, fullText) {
+            let currentText = "";
+            for (let i = 0; i < fullText.length; i++) {
+                currentText += fullText[i];
+                let chats = JSON.parse(localStorage.getItem(getStorageKey())) || [];
+                let chat = chats.find(c => c.id === chatId);
+                if (!chat) break;
+                chat.messages[messageIndex].text = currentText;
+                localStorage.setItem(getStorageKey(), JSON.stringify(chats));
+                if (currentChatId === chatId) renderMessages();
+                await new Promise(resolve => setTimeout(resolve, 10)); // Tốc độ gõ chữ
+            }
+        }
+
+        async function sendMessage() {
+            const inputEl = document.getElementById('user-input');
+            const text = inputEl.value.trim();
+            if (!text) return;
+
+            let chats = JSON.parse(localStorage.getItem(getStorageKey())) || [];
+            let currentChat = chats.find(c => c.id === currentChatId);
+            if (!currentChat) return;
+
+            if (currentChat.title === 'Cuộc trò chuyện mới') {
+                currentChat.title = text.length > 20 ? text.substring(0, 20) + '...' : text;
+                document.getElementById('current-chat-title').textContent = currentChat.title;
+            }
+
+            currentChat.messages.push({ sender: 'user', text });
+            inputEl.value = '';
+            localStorage.setItem(getStorageKey(), JSON.stringify(chats));
+            renderMessages();
+
+            // Thêm khung tin nhắn AI trống để chuẩn bị gõ chữ
+            currentChat.messages.push({ sender: 'ai', text: '...' });
+            const aiMsgIndex = currentChat.messages.length - 1;
+            localStorage.setItem(getStorageKey(), JSON.stringify(chats));
+            renderMessages();
+
+            try {
+                document.getElementById('ai-status').textContent = "🟡 Đang tạo phản hồi...";
+                
+                // Gọi API thực tế sử dụng file config.js
+                const response = await fetch(`${CONFIG.AI_ENDPOINT}?key=${CONFIG.API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: [{ parts: [{ text: text }] }] })
+                });
+
+                const data = await response.json();
+                const aiReply = data.candidates && data.candidates[0].content.parts[0].text 
+                    ? data.candidates[0].content.parts[0].text 
+                    : "Không nhận được phản hồi từ AI.";
+
+                document.getElementById('ai-status').textContent = "🟢 AI Ready";
+                await typeWriterEffect(currentChatId, aiMsgIndex, aiReply);
+
+            } catch (error) {
+                document.getElementById('ai-status').textContent = "🔴 Lỗi kết nối";
+                let chats = JSON.parse(localStorage.getItem(getStorageKey())) || [];
+                let chat = chats.find(c => c.id === currentChatId);
+                if(chat) {
+                    chat.messages[aiMsgIndex].text = "Lỗi kết nối API: " + error.message;
+                    localStorage.setItem(getStorageKey(), JSON.stringify(chats));
+                    renderMessages();
+                }
+            }
+        }
+
+        document.getElementById('user-input').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
